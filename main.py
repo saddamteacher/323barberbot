@@ -1,9 +1,11 @@
 import logging
 import os
 import re
+import asyncio
 from html import escape
 from typing import Optional
 
+import httpx
 from dotenv import load_dotenv
 from telegram import (
     KeyboardButton,
@@ -30,24 +32,33 @@ logging.basicConfig(
 
 ASK_NAME, ASK_CONTACT, ASK_DAY, ASK_TIME = range(4)
 
-PHONE_ICON = "\U0001F4DE"
-PIN_ICON = "\U0001F4CC"
+PHONE_ICON   = "\U0001F4DE"
+PIN_ICON     = "\U0001F4CC"
 CALENDAR_ICON = "\U0001F4C5"
-CLOCK_ICON = "\U000023F0"
-USER_ICON = "\U0001F464"
-LINK_ICON = "\U0001F517"
+CLOCK_ICON   = "\U000023F0"
+USER_ICON    = "\U0001F464"
+LINK_ICON    = "\U0001F517"
+
+
+# ─────────────────────────── Keyboards ────────────────────────────
+
 def build_contact_keyboard() -> ReplyKeyboardMarkup:
-    button = KeyboardButton(f"{PHONE_ICON} Kontaktni yuborish", request_contact=True,style="danger")
+    button = KeyboardButton(f"{PHONE_ICON} Kontaktni yuborish", request_contact=True)
     return ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
 
 
 def build_day_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[KeyboardButton(text="Bugun", style="danger")], [KeyboardButton(text="Ertaga", style="primary")]],
+        [
+            [KeyboardButton(text="Bugun")],
+            [KeyboardButton(text="Ertaga")],
+        ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
+
+# ─────────────────────────── Helpers ──────────────────────────────
 
 def _safe_name(update: Update) -> str:
     user = update.effective_user
@@ -78,10 +89,13 @@ def _format_manager_text(
     )
 
 
+# ─────────────────────────── Handlers ─────────────────────────────
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     await update.message.reply_text(
-        "Salom! Ismingizni kiriting, iltimos.", reply_markup=ReplyKeyboardRemove()
+        "Salom! Ismingizni kiriting, iltimos.",
+        reply_markup=ReplyKeyboardRemove(),
     )
     return ASK_NAME
 
@@ -92,19 +106,20 @@ async def ask_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         text = _safe_name(update)
     context.user_data["name"] = text
     await update.message.reply_text(
-        "Kontakt raqamingizni yuboring.", reply_markup=build_contact_keyboard()
+        "Kontakt raqamingizni yuboring.",
+        reply_markup=build_contact_keyboard(),
     )
     return ASK_CONTACT
 
 
 async def ask_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    contact = ""
     if update.message.contact:
         contact = update.message.contact.phone_number or ""
         if update.message.contact.first_name:
             context.user_data.setdefault("name", update.message.contact.first_name)
     else:
         contact = (update.message.text or "").strip()
+
     context.user_data["phone"] = contact or "Kontakt yo'q"
     await update.message.reply_text(
         "Qaysi kun uchun buyurtma kerak?",
@@ -133,18 +148,15 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["time"] = time_text or "Vaqt ko'rsatilmagan"
 
     user = update.effective_user
-    name = context.user_data.get("name") or _safe_name(update)
+    name  = context.user_data.get("name") or _safe_name(update)
     phone = context.user_data.get("phone") or "Kontakt yo'q"
-    day = context.user_data.get("day") or "Kun ko'rsatilmagan"
+    day   = context.user_data.get("day")   or "Kun ko'rsatilmagan"
+
     user_link = (
-        f"<a href=\"tg://user?id={user.id}\">{escape(name)}</a>"
-        if user
-        else name
+        f'<a href="tg://user?id={user.id}">{escape(name)}</a>'
+        if user else name
     )
     username = user.username if user else None
-    barber_address = os.environ.get(
-        "BARBER_ADDRESS", "Barber salon manzili hozirda mavjud emas."
-    )
 
     await update.message.reply_text(
         "✅ Zakazingiz qabul qilindi, sizga aloqaga chiqamiz.",
@@ -166,7 +178,7 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
                 ),
                 parse_mode=ParseMode.HTML,
             )
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
             logging.exception("Manager guruhiga xabar yuborishda xatolik: %s", exc)
     else:
         logging.warning("MANAGER_CHAT_ID muhit o'zgaruvchisi o'rnatilmagan.")
@@ -176,24 +188,49 @@ async def finalize(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
-        "Buyurtma bekor qilindi.", reply_markup=ReplyKeyboardRemove()
+        "Buyurtma bekor qilindi.",
+        reply_markup=ReplyKeyboardRemove(),
     )
     context.user_data.clear()
     return ConversationHandler.END
 
 
+# ─────────────────── Keep-alive & Heartbeat ───────────────────────
+
+async def keep_alive(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Render free tier uxlab qolmasligi uchun har 10 daqiqada
+    o'z URL-ga HTTP GET so'rov yuboradi.
+    RENDER_EXTERNAL_URL muhit o'zgaruvchisi Render tomonidan
+    avtomatik o'rnatiladi.
+    """
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not url:
+        logging.debug("RENDER_EXTERNAL_URL o'rnatilmagan, keep-alive o'tkazib yuborildi.")
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
+        logging.info("Keep-alive ping: %s → %s", url, resp.status_code)
+    except Exception as exc:
+        logging.warning("Keep-alive xatolik: %s", exc)
+
+
 async def send_heartbeat(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manager guruhiga hayot belgisi xabari yuboradi."""
     chat_id = os.environ.get("MANAGER_CHAT_ID")
     if not chat_id:
-        logging.debug("Heartbeat ignored because MANAGER_CHAT_ID is not set.")
+        logging.debug("Heartbeat ignored: MANAGER_CHAT_ID o'rnatilmagan.")
         return
-    message = os.environ.get("HEARTBEAT_MESSAGE", "Bot faoliyatda, signal yuborildi.")
+    message = os.environ.get("HEARTBEAT_MESSAGE", "✅ Bot faoliyatda.")
     try:
         await context.bot.send_message(chat_id=int(chat_id), text=message)
         logging.info("Heartbeat yuborildi.")
-    except Exception as exc:  # pragma: no cover
-        logging.warning("Heartbeat yuborishda xatolik: %s", exc)
+    except Exception as exc:
+        logging.warning("Heartbeat xatolik: %s", exc)
 
+
+# ─────────────────────────── Main ─────────────────────────────────
 
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -207,32 +244,47 @@ def main() -> None:
         .build()
     )
 
-    heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", "300"))
+    # ── Job queue ──
     if application.job_queue is None:
         logging.warning(
-            "JobQueue not available; heartbeat scheduling skipped. "
-            "Install python-telegram-bot[job-queue] if you need it."
+            "JobQueue mavjud emas. "
+            "pip install 'python-telegram-bot[job-queue]' orqali o'rnating."
         )
     else:
+        # Har 10 daqiqada keep-alive ping (600 soniya)
+        application.job_queue.run_repeating(
+            keep_alive,
+            interval=600,
+            first=60,          # botdan 1 daqiqa o'tgach boshlanadi
+        )
+
+        # Har 5 soatda heartbeat xabari (ixtiyoriy)
+        heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", "18000"))
         application.job_queue.run_repeating(
             send_heartbeat,
             interval=heartbeat_interval,
             first=heartbeat_interval,
         )
 
+    # ── Conversation handler ──
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_contact)],
+            ASK_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ask_contact)
+            ],
             ASK_CONTACT: [
                 MessageHandler(
-                    filters.CONTACT | (filters.TEXT & ~filters.COMMAND), ask_day
+                    filters.CONTACT | (filters.TEXT & ~filters.COMMAND),
+                    ask_day,
                 )
             ],
             ASK_DAY: [
-            MessageHandler(
-                filters.Regex("^(Bugun|Ertaga)$", flags=re.IGNORECASE), ask_time
-            )
+                MessageHandler(
+                    # re.compile ishlatiladi — Python 3.14 da (?i) ^ dan keyin ishlamaydi
+                    filters.Regex(re.compile(r"^(Bugun|Ertaga)$", re.IGNORECASE)),
+                    ask_time,
+                )
             ],
             ASK_TIME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, finalize)
