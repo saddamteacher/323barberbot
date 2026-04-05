@@ -207,11 +207,17 @@ def main() -> None:
     )
 
     heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", "300"))
-    application.job_queue.run_repeating(
-        send_heartbeat,
-        interval=heartbeat_interval,
-        first=heartbeat_interval,
-    )
+    if application.job_queue is None:
+        logging.warning(
+            "JobQueue not available; heartbeat scheduling skipped. "
+            "Install python-telegram-bot[job-queue] if you need it."
+        )
+    else:
+        application.job_queue.run_repeating(
+            send_heartbeat,
+            interval=heartbeat_interval,
+            first=heartbeat_interval,
+        )
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
