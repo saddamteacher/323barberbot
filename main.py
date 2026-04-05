@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from html import escape
 from typing import Optional
 
@@ -229,7 +230,9 @@ def main() -> None:
                 )
             ],
             ASK_DAY: [
-                MessageHandler(filters.Regex("^(?i)(Bugun|Ertaga)$"), ask_time)
+            MessageHandler(
+                filters.Regex("^(Bugun|Ertaga)$", flags=re.IGNORECASE), ask_time
+            )
             ],
             ASK_TIME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, finalize)
