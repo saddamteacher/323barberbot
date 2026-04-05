@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from html import escape
 from typing import Optional
 
@@ -207,11 +208,17 @@ def main() -> None:
     )
 
     heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", "300"))
-    application.job_queue.run_repeating(
-        send_heartbeat,
-        interval=heartbeat_interval,
-        first=heartbeat_interval,
-    )
+    if application.job_queue is None:
+        logging.warning(
+            "JobQueue not available; heartbeat scheduling skipped. "
+            "Install python-telegram-bot[job-queue] if you need it."
+        )
+    else:
+        application.job_queue.run_repeating(
+            send_heartbeat,
+            interval=heartbeat_interval,
+            first=heartbeat_interval,
+        )
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
@@ -223,7 +230,9 @@ def main() -> None:
                 )
             ],
             ASK_DAY: [
-                MessageHandler(filters.Regex("^(?i)(Bugun|Ertaga)$"), ask_time)
+            MessageHandler(
+                filters.Regex("^(Bugun|Ertaga)$", flags=re.IGNORECASE), ask_time
+            )
             ],
             ASK_TIME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, finalize)
